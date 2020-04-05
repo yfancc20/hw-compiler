@@ -218,18 +218,24 @@ Expression *parseExpressionTail( FILE *source, Expression *lvalue )
 
     switch(token.type){
         case PlusOp:
-            expr = (Expression *)malloc( sizeof(Expression) );
-            (expr->v).type = PlusNode;
-            (expr->v).val.op = Plus;
-            expr->leftOperand = lvalue;
-            expr->rightOperand = parseValue(source);
-            return parseExpressionTail(source, expr);
         case MinusOp:
+            ungetc(token.tok[0], source);
+            return lvalue;
+        case MulOp:
             expr = (Expression *)malloc( sizeof(Expression) );
-            (expr->v).type = MinusNode;
-            (expr->v).val.op = Minus;
+            (expr->v).type = MulNode;
+            (expr->v).val.op = Mul;
             expr->leftOperand = lvalue;
             expr->rightOperand = parseValue(source);
+            expressionTailFoldConst(expr);
+            return parseExpressionTail(source, expr);
+        case DivOp:
+            expr = (Expression *)malloc( sizeof(Expression) );
+            (expr->v).type = DivNode;
+            (expr->v).val.op = Div;
+            expr->leftOperand = lvalue;
+            expr->rightOperand = parseValue(source);
+            expressionTailFoldConst(expr);
             return parseExpressionTail(source, expr);
         case Alphabet:
         case PrintOp:
@@ -243,26 +249,43 @@ Expression *parseExpressionTail( FILE *source, Expression *lvalue )
     }
 }
 
+/* 
+parse first expression after the statement
+lvalue: the first value after the statement
+Example: 
+    a = 3 + 2 * 4, then lvalue is 3
+*/
 Expression *parseExpression( FILE *source, Expression *lvalue )
 {
     Token token = scanner(source);
-    Expression *expr;
+    Expression *expr, *expr_tmp;
+    Expression *expr_res; // reserved expression
 
     switch(token.type){
         case PlusOp:
             expr = (Expression *)malloc( sizeof(Expression) );
+            expr_res = parseValue(source);
             (expr->v).type = PlusNode;
             (expr->v).val.op = Plus;
             expr->leftOperand = lvalue;
-            expr->rightOperand = parseValue(source);
-            return parseExpressionTail(source, expr);
+            expr->rightOperand = parseExpressionTail(source, expr_res);
+            expressionFoldConst(expr);
+            return parseExpression(source, expr);
         case MinusOp:
             expr = (Expression *)malloc( sizeof(Expression) );
+            expr_res = parseValue(source);
             (expr->v).type = MinusNode;
             (expr->v).val.op = Minus;
             expr->leftOperand = lvalue;
-            expr->rightOperand = parseValue(source);
-            return parseExpressionTail(source, expr);
+            expr->rightOperand = parseExpressionTail(source, expr_res);
+            expressionFoldConst(expr);
+            return parseExpression(source, expr);
+        case MulOp:
+        case DivOp:
+            // ignore, let parseExpressionTail handle the priority
+            ungetc(token.tok[0], source);
+            expr_tmp = parseExpressionTail(source, lvalue);
+            return parseExpression(source, expr_tmp);
         case Alphabet:
         case PrintOp:
             ungetc(token.tok[0], source);
@@ -284,7 +307,7 @@ Statement parseStatement( FILE *source, Token token )
         case Alphabet:
             next_token = scanner(source);
             if(next_token.type == AssignmentOp){
-                value = parseValue(source);
+                value = parseValue(source); // get the first value after assigment symbol
                 expr = parseExpression(source, value);
                 return makeAssignmentNode(token.tok[0], value, expr);
             }
@@ -427,6 +450,11 @@ void add_table( SymbolTable *table, char c, DataType t )
     table->table[index] = t;
 }
 
+/*
+Example: 
+    i a (int a)   -> table[0] = INT
+    f d (float d) -> table[3] = FLOAT
+*/
 SymbolTable build( Program program )
 {
     SymbolTable table;
@@ -573,6 +601,12 @@ void fprint_op( FILE *target, ValueType op )
         case PlusNode:
             fprintf(target,"+\n");
             break;
+        case MulNode:
+            fprintf(target,"*\n");
+            break;
+        case DivNode:
+            fprintf(target,"/\n");
+            break;
         default:
             fprintf(target,"Error in fprintf_op ValueType = %d\n",op);
             break;
@@ -604,7 +638,6 @@ void fprint_expr( FILE *target, Expression *expr)
             fprintf(target,"5k\n");
         }
         else{
-            //	fprint_right_expr(expr->rightOperand);
             fprint_expr(target, expr->rightOperand);
             fprint_op(target, (expr->v).type);
         }
@@ -720,4 +753,70 @@ void test_parser( FILE *source )
         stmts = stmts->rest;
     }
 
+}
+
+/********************************************************
+  Constant Folder
+ *********************************************************/
+void expressionFoldConst(Expression *expr) {
+    DataType left = (expr->leftOperand->v).type;
+    DataType right = (expr->rightOperand->v).type;
+    int isplus = (expr->v).type == PlusNode ? 1 : 0;
+    int lefti = (expr->leftOperand->v).val.ivalue;
+    int righti = (expr->rightOperand->v).val.ivalue;
+    float leftf = (expr->leftOperand->v).val.fvalue;
+    float rightf = (expr->rightOperand->v).val.fvalue;
+
+    if (left == FloatConst && right == FloatConst) {
+        (expr->v).val.fvalue = isplus ? (leftf + rightf) : (leftf - rightf);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if (left == IntConst && right == FloatConst) {
+        (expr->v).val.fvalue = isplus ? ((float)lefti + rightf) : ((float)lefti - rightf);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if (left == FloatConst && right == IntConst) {
+        (expr->v).val.fvalue = isplus ? (leftf + (float)righti) : (leftf - (float)righti);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if( left == IntConst && right == IntConst ) {
+        (expr->v).val.ivalue = isplus ? (lefti + righti) : (lefti - righti);
+        (expr->v).type = IntConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+}
+
+
+void expressionTailFoldConst(Expression *expr) {
+    DataType left = (expr->leftOperand->v).type;
+    DataType right = (expr->rightOperand->v).type;
+    int ismul = (expr->v).type == MulNode ? 1 : 0;
+    int lefti = (expr->leftOperand->v).val.ivalue;
+    int righti = (expr->rightOperand->v).val.ivalue;
+    float leftf = (expr->leftOperand->v).val.fvalue;
+    float rightf = (expr->rightOperand->v).val.fvalue;
+
+    if (left == FloatConst && right == FloatConst) {
+        (expr->v).val.fvalue = ismul ? (leftf * rightf) : (leftf / rightf);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if (left == IntConst && right == FloatConst) {
+        (expr->v).val.fvalue = ismul ? ((float)lefti * rightf) : ((float)lefti / rightf);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if (left == FloatConst && right == IntConst) {
+        (expr->v).val.fvalue = ismul ? (leftf * (float)righti) : (leftf / (float)righti);
+        (expr->v).type = FloatConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
+    else if( left == IntConst && right == IntConst ) {
+        (expr->v).val.ivalue = ismul ? (lefti * righti) : (lefti / righti);
+        (expr->v).type = IntConst;
+        expr->leftOperand = expr->rightOperand = NULL;
+    }
 }

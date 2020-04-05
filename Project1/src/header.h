@@ -143,4 +143,7 @@ void gencode( Program prog, FILE * target );
 void print_expr( Expression *expr );
 void test_parser( FILE *source );
 
+void expressionFoldConst( Expression *expr );
+void expressionTailFoldConst( Expression *expr );
+
 #endif // HEADER_H_INCLUDED
